@@ -29,11 +29,23 @@ class UserSerializer(serializers.ModelSerializer):
 class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
-        fields = ['id', 'name', 'price', 'stock', 'created_at', 'updated_at', 'deleted_at']
+        fields = '__all__'
+    
+    def validate_barcode(self, value):
+        if self.instance is not None:
+            if value != self.instance.barcode:
+                if Product.objects.filter(barcode=value, deleted_at__isnull=True).exists():
+                    raise serializers.ValidationError("Já existe um produto com este código de barras.")
+        else:
+            if Product.objects.filter(barcode=value, deleted_at__isnull=True).exists():
+                raise serializers.ValidationError("Já existe um produto com este código de barras.")
+        return value
+
+
 
 class VendaSerializer(serializers.ModelSerializer):
-    client = UserSerializer(read_only=True)  # Inclui os detalhes do cliente na resposta
-    products = ProductSerializer(many=True, read_only=True)  # Inclui os detalhes dos produtos na resposta
+    client = UserSerializer(read_only=True)
+    products = ProductSerializer(many=True, read_only=True)
 
     class Meta:
         model = Venda

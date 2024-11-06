@@ -14,6 +14,7 @@ from .models import User, Product, Venda
 from .serializers import UserSerializer, ProductSerializer, VendaSerializer
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
+from django.db.models import Q
 
 
 
@@ -188,7 +189,121 @@ class UniqueUserAPIView(APIView):
 
 
 
+class ProductMainView(APIView):
+    permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        products = Product.objects.filter(deleted_at__isnull=True)
+        serializer = ProductSerializer(products, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        user = request.user
+        user_serializer = UserSerializer(user)
+
+        if not user_serializer.data.get('admin'):
+            return Response({"message": "Apenas administradores podem criar novos produtos."}, status=status.HTTP_403_FORBIDDEN)
+        
+        serializer = ProductSerializer(data=request.data)
+        if serializer.is_valid():
+            try:
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            except IntegrityError:
+                return Response(
+                    {"message": "Já existe um produto com esse código de barras."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+
+    def put(self, request):
+        user = request.user
+        user_serializer = UserSerializer(user)
+
+        if not user_serializer.data.get('admin'):
+            return Response({"message": "Apenas administradores podem atualizar produtos."}, status=status.HTTP_403_FORBIDDEN)
+
+        identifier = request.data.get("id") or request.data.get("barcode")
+
+        if not identifier:
+            return Response({"message": "ID ou código de barras é obrigatório."}, status=status.HTTP_400_BAD_REQUEST)
+
+        product = None
+        if isinstance(identifier, str) and len(identifier) == 36:
+            product = get_object_or_404(Product, id=identifier)
+        elif isinstance(identifier, str):
+            product = get_object_or_404(Product, barcode=identifier)
+        else:
+            return Response({"message": "ID ou código de barras inválido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = ProductSerializer(product, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+
+    def delete(self, request):
+        user = request.user
+        user_serializer = UserSerializer(user)
+
+        if not user_serializer.data.get('admin'):
+            return Response({"message": "Apenas administradores podem deletar produtos."}, status=status.HTTP_403_FORBIDDEN)
+
+        identifier = request.data.get("id") or request.data.get("barcode")
+
+        if not identifier:
+            return Response({"message": "É necessário fornecer o id ou o código de barras do produto."}, status=status.HTTP_400_BAD_REQUEST)
+
+        product = None
+        if isinstance(identifier, str) and len(identifier) == 36:
+            product = get_object_or_404(Product, id=identifier)
+        elif isinstance(identifier, str):
+            product = get_object_or_404(Product, barcode=identifier)
+        else:
+            return Response({"message": "ID ou código de barras inválido."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if product.deleted_at:
+            return Response({"message": "Este produto já foi deletado."}, status=status.HTTP_400_BAD_REQUEST)
+
+        product.deleted_at = timezone.now()
+        product.save()
+
+        return Response({"message": "Produto deletado com sucesso."}, status=status.HTTP_200_OK)
+
+
+class ProductDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        identifier = request.query_params.get('identifier', None)
+
+        if not identifier:
+            return Response({"message": "É necessário fornecer o id ou o código de barras do produto."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        
+        product = None
+        if isinstance(identifier, str) and len(identifier) == 36:
+            product = get_object_or_404(Product, id=identifier)
+        elif isinstance(identifier, str):
+            product = get_object_or_404(Product, barcode=identifier)
+        else:
+            return Response({"message": "ID ou código de barras inválido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = ProductSerializer(product)
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+
+class ProductStockView(APIView):
+    
+    def get(self, request):
+        products = Product.objects.filter(deleted_at__isnull=True).order_by('stock')[:4]
+        serializer = ProductSerializer(products, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 
@@ -204,35 +319,6 @@ class UniqueUserAPIView(APIView):
 
 
 #EM PRODUÇÃO
-class ProductListCreateAPIView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        products = Product.objects.all()
-        serializer = ProductSerializer(products, many=True)
-        return Response(serializer.data)
-
-    def post(self, request):
-        serializer = ProductSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({"message": "Produto criado com sucesso"}, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-class ProductUpdateStockAPIView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, pk):
-        product = get_object_or_404(Product, pk=pk)
-        stock = request.data.get("stock")
-        if stock is not None:
-            product.stock = stock
-            product.save()
-            return Response({"message": "Estoque atualizado com sucesso"}, status=status.HTTP_200_OK)
-        return Response({"message": "Valor de estoque inválido"}, status=status.HTTP_400_BAD_REQUEST)
-
-
 class VendaListCreateAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
