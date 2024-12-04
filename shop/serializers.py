@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User, Product, Venda
+from .models import User, Product, Venda, VendaItem
 
 from django.contrib.auth import get_user_model
 
@@ -43,10 +43,19 @@ class ProductSerializer(serializers.ModelSerializer):
 
 
 
+class VendaItemSerializer(serializers.ModelSerializer):
+    product_id = serializers.CharField(source='product.id')
+    product_name = serializers.CharField(source='product.name')
+    quantity = serializers.IntegerField()
+
+    class Meta:
+        model = VendaItem
+        fields = ['product_id', 'product_name', 'quantity']
+
 class VendaSerializer(serializers.ModelSerializer):
-    client = UserSerializer(read_only=True)
-    products = ProductSerializer(many=True, read_only=True)
+    client = serializers.CharField(source="client.username")
+    products = VendaItemSerializer(source='vendaitem_set', many=True)
 
     class Meta:
         model = Venda
-        fields = ['id', 'client', 'products', 'created_at', 'updated_at', 'deleted_at']
+        fields = ["id", "client", "products", "total", "discount", "status", "created_at", "updated_at"]

@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import User, Product, Venda
+from .models import User, Product, Venda, VendaItem
 
 class CustomUserAdmin(UserAdmin):
     readonly_fields = ('created_at', 'updated_at', 'deleted_at')
@@ -13,3 +13,4 @@ class CustomUserAdmin(UserAdmin):
 admin.site.register(User, CustomUserAdmin)
 admin.site.register(Product)
 admin.site.register(Venda)
+admin.site.register(VendaItem)

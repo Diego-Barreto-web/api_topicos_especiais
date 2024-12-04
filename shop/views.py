@@ -4,7 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.contrib.auth import authenticate
-from .models import User
+from .models import User, VendaItem
 from .serializers import UserSerializer
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -307,52 +307,220 @@ class ProductStockView(APIView):
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-#EM PRODUÇÃO
-class VendaListCreateAPIView(APIView):
+class VendaAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        vendas = Venda.objects.all()
+        vendas = Venda.objects.filter(client=request.user).select_related('client').prefetch_related('vendaitem_set__product')
         serializer = VendaSerializer(vendas, many=True)
-        return Response(serializer.data)
 
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
     def post(self, request):
-        client_id = request.data.get("client_id")
-        product_ids = request.data.get("product_ids")
+        products_data = request.data.get("products", [])
+        user = request.user
 
-        if not client_id or not product_ids:
-            return Response({"message": "client_id e product_ids são obrigatórios"}, status=status.HTTP_400_BAD_REQUEST)
+        if not products_data:
+            return Response(
+                {"message": "A lista de produtos é obrigatória."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        try:
-            client = User.objects.get(id=client_id, admin=False)  # Filtra apenas usuários que não são admin
-        except User.DoesNotExist:
-            return Response({"message": "Cliente não encontrado"}, status=status.HTTP_404_NOT_FOUND)
+        venda_pendente = Venda.objects.filter(client=user, status="PENDENTE").first()
 
-        products = Product.objects.filter(id__in=product_ids)
-        if not products or products.count() != len(product_ids):
-            return Response({"message": "Um ou mais produtos não encontrados"}, status=status.HTTP_404_NOT_FOUND)
+        if venda_pendente:
+            venda_pendente.status = "CANCELADA"
+            venda_pendente.save()
 
-        # Verificar estoque e atualizar
-        for product in products:
-            if product.stock <= 0:
-                return Response({"message": f"Produto {product.name} está sem estoque"}, status=status.HTTP_400_BAD_REQUEST)
-            product.stock -= 1  # Diminui o estoque em 1 para cada produto
+            for venda_item in venda_pendente.vendaitem_set.all():
+                product = venda_item.product
+                product.stock += venda_item.quantity 
+                product.save()
+
+        venda = Venda.objects.create(client=user, status="PENDENTE")
+        total = 0
+
+        for product_data in products_data:
+            product_id = product_data.get("product_id")
+            quantity = product_data.get("quantity", 1)
+
+            if not product_id or quantity <= 0:
+                return Response(
+                    {"message": "Cada produto deve ter um 'product_id' válido e 'quantity' maior que 0."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            product = get_object_or_404(Product, id=product_id, deleted_at__isnull=True)
+
+            if product.stock < quantity:
+                return Response(
+                    {"message": f"O produto '{product.name}' não tem estoque suficiente."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            VendaItem.objects.create(venda=venda, product=product, quantity=quantity)
+
+            product.stock -= quantity
             product.save()
 
-        # Cria a nova venda
-        venda = Venda.objects.create(client=client)
-        venda.products.set(products)
+            total += product.sale_value * quantity
+
+        venda.total = total
         venda.save()
 
-        return Response(VendaSerializer(venda).data, status=status.HTTP_201_CREATED)
+        return Response(
+            venda.serialize(),
+            status=status.HTTP_201_CREATED
+        )
+    
+    def put(self, request):
+        venda = Venda.objects.filter(client=request.user, status='PENDENTE').first()
+
+        if not venda:
+            return Response(
+                {"message": "Nenhuma venda pendente encontrada."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        products_data = request.data.get("products", [])
+
+        if not products_data:
+            return Response(
+                {"message": "A lista de produtos é obrigatória."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        total = venda.total
+
+        for product_data in products_data:
+            product_id = product_data.get("product_id")
+            quantity = product_data.get("quantity", 1)
+
+            if not product_id:
+                return Response(
+                    {"message": "Cada produto deve ter um 'product_id' válido."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if quantity == 0:
+                venda_item = VendaItem.objects.filter(venda=venda, product__id=product_id).first()
+                if venda_item:
+                    product = venda_item.product
+                    product.stock += venda_item.quantity 
+                    product.save()
+                    total -= venda_item.product.sale_value * venda_item.quantity  
+                    venda_item.delete()
+                continue 
+
+            product = get_object_or_404(Product, id=product_id, deleted_at__isnull=True)
+
+            if product.stock < quantity and quantity > 0:
+                return Response(
+                    {"message": f"O produto '{product.name}' não tem estoque suficiente."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            venda_item = VendaItem.objects.filter(venda=venda, product=product).first()
+
+            if venda_item:
+                previous_quantity = venda_item.quantity
+                venda_item.quantity += quantity
+
+                if venda_item.quantity <= 0:
+                    product.stock += previous_quantity
+                    product.save()
+                    total -= venda_item.product.sale_value * previous_quantity
+                    venda_item.delete()
+                    continue
+                else:
+                    if quantity < 0:
+                        product.stock -= abs(quantity) 
+                    else:
+                        product.stock -= quantity
+                    product.save()
+
+                    total += product.sale_value * quantity
+
+            else:
+                if quantity > 0:
+                    venda_item = VendaItem.objects.create(venda=venda, product=product, quantity=quantity)
+                    product.stock -= quantity
+                    product.save()
+
+                    total += product.sale_value * quantity
+
+            venda_item.save()
+
+        venda.total = total
+        venda.save()
+
+        return Response(
+            venda.serialize(),
+            status=status.HTTP_200_OK
+        )
+    
+    def delete(self, request):
+        venda = Venda.objects.filter(client=request.user, status='PENDENTE').first()
+
+        if not venda:
+            return Response(
+                {"message": "Nenhuma venda pendente encontrada."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        venda.status = 'CANCELADA'
+        venda.save()
+
+        for venda_item in venda.vendaitem_set.all():
+            product = venda_item.product
+            product.stock += venda_item.quantity
+            product.save()
+
+        return Response(
+            {"message": f"Venda {venda.id} cancelada com sucesso e produtos devolvidos ao estoque."},
+            status=status.HTTP_200_OK
+        )
+    
+class PayVendaView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        venda = Venda.objects.filter(client=request.user, status='PENDENTE').first()
+
+        if not venda:
+            return Response(
+                {"message": "Nenhuma venda pendente encontrada."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        pagamento = request.data.get("pagamento", False) 
+
+        if not pagamento:
+            return Response(
+                {"message": "O pagamento não foi informado ou não foi realizado."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        venda.status = "PAGO"
+        venda.save()
+
+        return Response(
+            {"message": "Venda paga com sucesso.", "venda": venda.serialize()},
+            status=status.HTTP_200_OK
+        )
+    
+class VendaListAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not getattr(request.user, 'admin', False):
+            return Response(
+                {"message": "Acesso restrito. Somente administradores podem visualizar todas as vendas."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        vendas = Venda.objects.all()
+
+        serialized_vendas = [venda.serialize() for venda in vendas]
+
+        return Response(serialized_vendas, status=status.HTTP_200_OK)
